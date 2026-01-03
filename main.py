@@ -9,7 +9,7 @@ if not TOKEN:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот работает ✅")
+    await update.message.reply_text("Бот запущен ✅")
 
 
 def main():
@@ -17,7 +17,8 @@ def main():
 
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.run_polling()
+
+    app.run_polling()   # ← ВАЖНО: без asyncio.run()
 
 
 if __name__ == "__main__":
