@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 
-TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
+TOKEN = os.getenv("BOT_TOKEN")
 
 BINANCE_URL = "https://api.binance.com/api/v3/klines"
 
