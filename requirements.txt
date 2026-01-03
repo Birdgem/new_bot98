@@ -2,3 +2,4 @@ aiogram==3.4.1
 ccxt==4.2.85
 pandas==2.2.2
 numpy==1.26.4
+aiohttp
