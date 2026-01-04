@@ -1,200 +1,174 @@
-import os
 import asyncio
-import logging
-from datetime import datetime
-
 import aiohttp
-from fastapi import FastAPI, Request
+import time
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
-from aiogram.enums import ParseMode
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# =======================
-# НАСТРОЙКИ
-# =======================
+# ================= НАСТРОЙКИ =================
 
-TOKEN = os.getenv("TOKEN")  # Telegram Bot Token
-ADMIN_ID = int(os.getenv("ADMIN_ID"))  # ТВОЙ TG ID
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://xxx.onrender.com/webhook
-PORT = int(os.getenv("PORT", 10000))
+TOKEN = "PASTE_YOUR_TOKEN_HERE"
+ADMIN_ID = 123456789
 
-TIMEFRAME = "15m"
+TIMEFRAME = "5m"
+SCAN_INTERVAL = 300  # 5 минут
 
-PAIRS = [
-    "HUSDT", "SOLUSDT", "ETHUSDT", "RIVERUSDT", "LIGHTUSDT",
-    "BEATUSDT", "CYSUSDT", "ZPKUSDT", "RAVEUSDT", "DOGEUSDT"
-]
+BINANCE_URL = "https://api.binance.com/api/v3/klines"
 
-ACTIVE_PAIRS = {p: False for p in PAIRS}
+# ================= ПАРЫ =================
 
-BINANCE_KLINES = "https://fapi.binance.com/fapi/v1/klines"
+PAIRS = {
+    "H": False,
+    "SOL": False,
+    "ETH": False,
+    "RIVER": False,
+    "LIGHT": False,
+    "BEAT": False,
+    "CYS": False,
+    "ZPK": False,
+    "RAVE": False,
+    "DOGE": False,
+}
 
-logging.basicConfig(level=logging.INFO)
+last_signal = {}
 
-# =======================
-# BOT / APP
-# =======================
+# ================= BOT =================
 
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
-app = FastAPI()
 
-# =======================
-# BINANCE
-# =======================
+# ================= КЛАВИАТУРА =================
 
-async def get_klines(symbol: str, interval: str, limit: int = 100):
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
+def pairs_keyboard():
+    buttons = []
+    for pair, enabled in PAIRS.items():
+        status = "🟢" if enabled else "🔴"
+        buttons.append(
+            InlineKeyboardButton(
+                text=f"{status} {pair}",
+                callback_data=f"toggle:{pair}"
+            )
+        )
+
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(*buttons)
+    return kb
+
+# ================= BINANCE =================
+
+async def fetch_klines(symbol: str, interval: str, limit: int = 100):
+    params = {
+        "symbol": symbol + "USDT",
+        "interval": interval,
+        "limit": limit
+    }
     async with aiohttp.ClientSession() as session:
-        async with session.get(BINANCE_KLINES, params=params) as resp:
+        async with session.get(BINANCE_URL, params=params) as resp:
             return await resp.json()
 
 def ema(values, period):
     k = 2 / (period + 1)
-    ema_val = values[0]
-    for v in values[1:]:
-        ema_val = v * k + ema_val * (1 - k)
-    return ema_val
+    e = values[0]
+    for price in values[1:]:
+        e = price * k + e * (1 - k)
+    return e
 
-def vwap(klines):
-    pv = 0
-    vol = 0
-    for k in klines:
-        price = (float(k[1]) + float(k[4])) / 2
-        volume = float(k[5])
-        pv += price * volume
-        vol += volume
-    return pv / vol if vol else 0
+def vwap(closes, volumes):
+    total = sum(volumes)
+    if total == 0:
+        return None
+    return sum(c * v for c, v in zip(closes, volumes)) / total
 
-# =======================
-# КЛАВИАТУРА
-# =======================
+# ================= АНАЛИЗ =================
 
-def main_keyboard():
-    rows = []
+async def analyze_pair(pair: str):
+    klines = await fetch_klines(pair, TIMEFRAME)
+    if not isinstance(klines, list) or len(klines) < 30:
+        return None
 
-    for p in PAIRS:
-        state = "✅" if ACTIVE_PAIRS[p] else "❌"
-        rows.append([
-            InlineKeyboardButton(
-                text=f"{state} {p.replace('USDT','')}",
-                callback_data=f"pair:{p}"
-            )
-        ])
+    closes = [float(k[4]) for k in klines]
+    volumes = [float(k[5]) for k in klines]
 
-    rows.append([
-        InlineKeyboardButton(text="📊 Статус", callback_data="status")
-    ])
+    price = closes[-1]
+    ema7 = ema(closes[-7:], 7)
+    ema25 = ema(closes[-25:], 25)
+    vw = vwap(closes, volumes)
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    if not vw:
+        return None
 
-# =======================
-# КОМАНДЫ
-# =======================
+    if price > ema7 > ema25 and price > vw:
+        signal = "📈 ЛОНГ"
+    elif price < ema7 < ema25 and price < vw:
+        signal = "📉 ШОРТ"
+    else:
+        return None
 
-@dp.message(F.text == "/start")
-async def start_cmd(message: Message):
+    text = (
+        f"📊 {pair}USDT ({TIMEFRAME})\n"
+        f"{signal}\n\n"
+        f"Цена: {price:.4f}\n"
+        f"EMA7: {ema7:.4f}\n"
+        f"EMA25: {ema25:.4f}\n"
+        f"VWAP: {vw:.4f}\n\n"
+        f"https://www.binance.com/ru/futures/{pair}USDT"
+    )
+    return text
+
+# ================= HANDLERS =================
+
+@dp.message(Command("start"))
+async def start_handler(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
 
     await message.answer(
-        "🤖 <b>Сигнальный бот запущен</b>\n\n"
-        "EMA7 / EMA25 / VWAP\n"
-        "Выбери пары для мониторинга 👇",
-        reply_markup=main_keyboard()
+        "⚙️ Управление торговыми парами\n\n"
+        "🟢 — включена\n"
+        "🔴 — выключена",
+        reply_markup=pairs_keyboard()
     )
 
-# =======================
-# КНОПКИ
-# =======================
-
-@dp.callback_query(F.data.startswith("pair:"))
-async def toggle_pair(callback: CallbackQuery):
-    await callback.answer()
-
+@dp.callback_query(lambda c: c.data.startswith("toggle:"))
+async def toggle_pair(callback: types.CallbackQuery):
     pair = callback.data.split(":")[1]
-    ACTIVE_PAIRS[pair] = not ACTIVE_PAIRS[pair]
+    PAIRS[pair] = not PAIRS[pair]
 
-    await callback.message.edit_reply_markup(reply_markup=main_keyboard())
-
-@dp.callback_query(F.data == "status")
-async def status_handler(callback: CallbackQuery):
-    await callback.answer()
-
-    active = [p for p, v in ACTIVE_PAIRS.items() if v]
-
-    text = (
-        "🟢 <b>Статус бота</b>\n\n"
-        f"⏱ Таймфрейм: {TIMEFRAME}\n"
-        f"📡 Webhook: активен\n"
-        f"📈 Активные пары: {', '.join(active) if active else 'нет'}\n"
-        f"🕒 {datetime.utcnow().strftime('%H:%M:%S')} UTC"
+    await callback.answer(
+        f"{pair} {'включена' if PAIRS[pair] else 'выключена'}"
     )
+    await callback.message.edit_reply_markup(reply_markup=pairs_keyboard())
 
-    await callback.message.answer(text)
+# ================= SCANNER =================
 
-# =======================
-# СИГНАЛЫ
-# =======================
-
-async def scan_pairs():
+async def scanner():
     while True:
-        for pair, enabled in ACTIVE_PAIRS.items():
+        for pair, enabled in PAIRS.items():
             if not enabled:
                 continue
 
-            klines = await get_klines(pair, TIMEFRAME)
-            closes = [float(k[4]) for k in klines]
+            try:
+                result = await analyze_pair(pair)
+                if not result:
+                    continue
 
-            price = closes[-1]
-            ema7 = ema(closes[-7:], 7)
-            ema25 = ema(closes[-25:], 25)
-            vw = vwap(klines)
+                if last_signal.get(pair) == result:
+                    continue
 
-            if price > ema7 > ema25 and price > vw:
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"📈 <b>{pair}</b> ({TIMEFRAME})\n"
-                    f"🔵 ЛОНГ\n\n"
-                    f"Цена: {price:.4f}\n"
-                    f"EMA7: {ema7:.4f}\n"
-                    f"EMA25: {ema25:.4f}\n"
-                    f"VWAP: {vw:.4f}\n\n"
-                    f"https://www.binance.com/ru/futures/{pair}"
-                )
+                last_signal[pair] = result
+                await bot.send_message(ADMIN_ID, result)
 
-        await asyncio.sleep(60)
+            except Exception as e:
+                print(f"{pair} error:", e)
 
-# =======================
-# WEBHOOK
-# =======================
+        await asyncio.sleep(SCAN_INTERVAL)
 
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    await dp.feed_update(bot, data)
-    return {"ok": True}
+# ================= MAIN =================
 
-@app.on_event("startup")
-async def on_startup():
-    await bot.set_webhook(WEBHOOK_URL)
-    asyncio.create_task(scan_pairs())
-    logging.info(f"Webhook set: {WEBHOOK_URL}")
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await bot.delete_webhook()
-
-# =======================
-# RUN
-# =======================
+async def main():
+    asyncio.create_task(scanner())
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    asyncio.run(main())
