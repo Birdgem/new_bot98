@@ -5,6 +5,7 @@ from typing import Dict, List
 import os
 
 
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
@@ -12,7 +13,11 @@ from aiogram.enums import ParseMode
 
 # ===================== НАСТРОЙКИ =====================
 
-TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKENS = [
+    os.getenv("BOT_TOKEN_1"),
+    # os.getenv("BOT_TOKEN_2"),
+    # os.getenv("BOT_TOKEN_3"),
+]
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 TIMEFRAME = "5m"
