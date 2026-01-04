@@ -1,194 +1,158 @@
+import os
 import asyncio
 import aiohttp
 import time
-import os
-from typing import List, Dict
-
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ================== НАСТРОЙКИ ==================
+TOKEN = os.getenv("TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")        # токен бота
-ADMIN_ID = int(os.getenv("ADMIN_ID"))     # твой telegram user_id
-
-SYMBOLS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "SOLUSDT",
-]
-
-TIMEFRAME = "5m"
-SCAN_INTERVAL = 300        # скан рынка (сек)
-ALIVE_INTERVAL = 3600      # бот жив (сек)
-
-BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
-
-# защита от спама одинаковых сигналов
-last_signal: Dict[str, str] = {}
-
-start_time = time.time()
-
-# ================== УТИЛИТЫ ==================
-
-async def fetch_klines(symbol: str, limit: int = 100):
-    params = {
-        "symbol": symbol,
-        "interval": TIMEFRAME,
-        "limit": limit
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(BINANCE_KLINES, params=params) as r:
-            return await r.json()
-
-
-def ema(values: List[float], period: int):
-    if len(values) < period:
-        return None
-    k = 2 / (period + 1)
-    e = sum(values[:period]) / period
-    for v in values[period:]:
-        e = v * k + e * (1 - k)
-    return e
-
-
-def vwap(prices: List[float], volumes: List[float]):
-    total = sum(volumes)
-    if total == 0:
-        return None
-    return sum(p * v for p, v in zip(prices, volumes)) / total
-
-
-# ================== АНАЛИЗ ==================
-
-async def analyze(symbol: str):
-    klines = await fetch_klines(symbol)
-
-    if not isinstance(klines, list) or len(klines) < 30:
-        return None
-
-    closes, highs, lows, volumes = [], [], [], []
-
-    for k in klines:
-        try:
-            closes.append(float(k[4]))
-            highs.append(float(k[2]))
-            lows.append(float(k[3]))
-            volumes.append(float(k[5]))
-        except Exception:
-            return None
-
-    price = closes[-1]
-
-    ema7 = ema(closes, 7)
-    ema25 = ema(closes, 25)
-    vw = vwap(closes, volumes)
-
-    if not all([ema7, ema25, vw]):
-        return None
-
-    avg_volume = sum(volumes[-20:]) / 20
-    vol_ratio = volumes[-1] / avg_volume if avg_volume else 0
-
-    # тренд
-    bullish = ema7 > ema25
-    bearish = ema7 < ema25
-
-    # сигналы
-    signal = None
-
-    if bullish and price > vw:
-        signal = "📈 ЛОНГ"
-        if vol_ratio > 1.5:
-            signal = "🔥 ЛОНГ"
-
-    elif bearish and price < vw:
-        signal = "📉 ШОРТ"
-        if vol_ratio > 1.5:
-            signal = "🔥 ШОРТ"
-
-    # пробой
-    high_break = price > max(highs[-20:])
-    low_break = price < min(lows[-20:])
-
-    if high_break and vol_ratio > 1.5:
-        signal = "🚀 ПРОБОЙ ВВЕРХ"
-
-    if low_break and vol_ratio > 1.5:
-        signal = "💥 ПРОБОЙ ВНИЗ"
-
-    if not signal:
-        return None
-
-    return {
-        "symbol": symbol,
-        "signal": signal,
-        "price": price,
-        "ema7": ema7,
-        "ema25": ema25,
-        "vwap": vw,
-        "volume": vol_ratio,
-    }
-
-
-# ================== БОТ ==================
-
-bot = Bot(BOT_TOKEN)
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+BINANCE_URL = "https://api.binance.com/api/v3/klines"
 
+PAIRS = [
+    "HUSDT", "SOLUSDT", "ETHUSDT", "RIVERUSDT", "LIGHTUSDT",
+    "BEATUSDT", "CYSUSDT", "ZPKUSDT", "RAVEUSDT", "DOGEUSDT"
+]
+
+ENABLED_PAIRS = {p: False for p in PAIRS}
+TIMEFRAMES = ["1m", "5m", "15m"]
+CURRENT_TF = "5m"
+
+LAST_SIGNAL = {}
+
+# ====== UTILS ======
+def ema(data, period):
+    k = 2 / (period + 1)
+    e = data[0]
+    for p in data[1:]:
+        e = p * k + e * (1 - k)
+    return e
+
+def vwap(closes, volumes):
+    return sum(c * v for c, v in zip(closes, volumes)) / sum(volumes)
+
+# ====== BINANCE ======
+async def get_klines(symbol, interval, limit=100):
+    async with aiohttp.ClientSession() as s:
+        async with s.get(BINANCE_URL, params={
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit
+        }) as r:
+            return await r.json()
+
+# ====== ANALYSIS ======
+async def analyze(pair):
+    kl = await get_klines(pair, CURRENT_TF)
+    closes = [float(k[4]) for k in kl]
+    volumes = [float(k[5]) for k in kl]
+
+    price = closes[-1]
+    ema7 = ema(closes[-7:], 7)
+    ema25 = ema(closes[-25:], 25)
+    vw = vwap(closes, volumes)
+    vol_now = volumes[-1]
+    vol_avg = sum(volumes[-20:]) / 20
+
+    strength = ""
+    if vol_now > vol_avg * 1.8:
+        strength = "🔥🔥"
+    elif vol_now > vol_avg * 1.3:
+        strength = "🔥"
+
+    if price > ema7 > ema25 and price > vw:
+        direction = f"📈 ЛОНГ {strength}"
+    elif price < ema7 < ema25 and price < vw:
+        direction = f"📉 ШОРТ {strength}"
+    else:
+        return None
+
+    if LAST_SIGNAL.get(pair) == direction:
+        return None
+
+    LAST_SIGNAL[pair] = direction
+
+    return (
+        f"📊 {pair} ({CURRENT_TF})\n"
+        f"💰 Цена: {price:.4f}\n"
+        f"EMA7: {ema7:.4f}\n"
+        f"EMA25: {ema25:.4f}\n"
+        f"VWAP: {vw:.4f}\n"
+        f"📦 Объём: {'высокий' if strength else 'обычный'}\n\n"
+        f"{direction}\n"
+        f"🔗 https://www.binance.com/ru/futures/{pair}"
+    )
+
+# ====== KEYBOARDS ======
+def main_keyboard():
+    rows = []
+    for p, on in ENABLED_PAIRS.items():
+        rows.append([
+            InlineKeyboardButton(
+                text=("🟢 " if on else "🔴 ") + p.replace("USDT",""),
+                callback_data=f"pair:{p}"
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(text=f"⏱ TF: {CURRENT_TF}", callback_data="tf")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+# ====== COMMANDS ======
 @dp.message(Command("start"))
-async def start_cmd(message: Message):
-    if message.from_user.id != ADMIN_ID:
+async def start(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID:
         return
-    await message.answer("🟢 Сигнальный бот запущен")
+    await msg.answer("⚙️ Управление ботом", reply_markup=main_keyboard())
 
+@dp.callback_query()
+async def callbacks(c: types.CallbackQuery):
+    global CURRENT_TF
 
+    if c.from_user.id != ADMIN_ID:
+        return
+
+    if c.data.startswith("pair:"):
+        p = c.data.split(":")[1]
+        ENABLED_PAIRS[p] = not ENABLED_PAIRS[p]
+
+    elif c.data == "tf":
+        i = TIMEFRAMES.index(CURRENT_TF)
+        CURRENT_TF = TIMEFRAMES[(i + 1) % len(TIMEFRAMES)]
+
+    await c.message.edit_reply_markup(reply_markup=main_keyboard())
+    await c.answer()
+
+# ====== SCANNER ======
 async def scanner():
     while True:
-        for symbol in SYMBOLS:
-            result = await analyze(symbol)
-            if not result:
+        for p, on in ENABLED_PAIRS.items():
+            if not on:
                 continue
+            try:
+                res = await analyze(p)
+                if res:
+                    await bot.send_message(ADMIN_ID, res)
+            except Exception as e:
+                print(p, e)
+        await asyncio.sleep(60)
 
-            key = f"{symbol}"
-            if last_signal.get(key) == result["signal"]:
-                continue
-
-            last_signal[key] = result["signal"]
-
-            text = (
-                f"📊 {symbol}\n"
-                f"🚦 {result['signal']}\n\n"
-                f"Цена: {result['price']:.4f}\n"
-                f"EMA7: {result['ema7']:.4f}\n"
-                f"EMA25: {result['ema25']:.4f}\n"
-                f"VWAP: {result['vwap']:.4f}\n"
-                f"Объём x{result['volume']:.2f}\n\n"
-                f"https://www.binance.com/futures/{symbol}"
-            )
-
-            await bot.send_message(ADMIN_ID, text)
-
-        await asyncio.sleep(SCAN_INTERVAL)
-
-
-async def alive_ping():
+# ====== HEARTBEAT ======
+async def heartbeat():
     while True:
-        uptime = int((time.time() - start_time) / 60)
-        await bot.send_message(
-            ADMIN_ID,
-            f"🟢 Бот жив\n⏱ Аптайм: {uptime} мин"
-        )
-        await asyncio.sleep(ALIVE_INTERVAL)
+        await bot.send_message(ADMIN_ID, "✅ Бот жив и работает")
+        await asyncio.sleep(3600)
 
-
+# ====== MAIN ======
 async def main():
     asyncio.create_task(scanner())
-    asyncio.create_task(alive_ping())
+    asyncio.create_task(heartbeat())
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
