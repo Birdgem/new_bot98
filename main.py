@@ -21,13 +21,13 @@ PAIRS = [
 
 ENABLED_PAIRS = {p: False for p in PAIRS}
 TIMEFRAMES = ["1m", "5m", "15m"]
-CURRENT_TF = "5m"
+CURRENT_TF = "15m"
 
-STRICT_MODE = False
+STRICT_MODE = False  # 🔥 СТРОГИЙ РЕЖИМ
 
 LAST_SIGNAL = {}
 LAST_BREAKOUT = {}
-LAST_SCAN_TS = None
+LAST_SCAN_TS = 0
 START_TS = time.time()
 
 SCAN_INTERVAL = 60
@@ -49,32 +49,6 @@ def vwap(closes, volumes):
         return None
     return sum(c * v for c, v in zip(closes, volumes)) / total_vol
 
-def rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return None
-    gains, losses = [], []
-    for i in range(-period, 0):
-        diff = closes[i] - closes[i - 1]
-        if diff >= 0:
-            gains.append(diff)
-        else:
-            losses.append(abs(diff))
-    avg_gain = sum(gains) / period if gains else 0
-    avg_loss = sum(losses) / period if losses else 0
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def macd(closes):
-    ema12 = ema(closes, 12)
-    ema26 = ema(closes, 26)
-    if not ema12 or not ema26:
-        return None, None
-    macd_line = ema12 - ema26
-    signal_line = macd_line
-    return macd_line, signal_line
-
 # ========= BINANCE =========
 async def get_klines(symbol, interval, limit=120):
     async with aiohttp.ClientSession() as s:
@@ -86,26 +60,30 @@ async def get_klines(symbol, interval, limit=120):
             return data if isinstance(data, list) else []
 
 # ========= BTC CONTEXT =========
-async def btc_trend():
+async def btc_context():
     kl = await get_klines("BTCUSDT", CURRENT_TF)
     if len(kl) < 30:
-        return None
+        return "неопределён"
 
     closes = [float(k[4]) for k in kl]
     ema7 = ema(closes, 7)
     ema25 = ema(closes, 25)
 
-    if ema7 > ema25:
-        return "bull"
-    elif ema7 < ema25:
-        return "bear"
-    return "neutral"
+    if not ema7 or not ema25:
+        return "неопределён"
+
+    if closes[-1] > ema7 > ema25:
+        return "бычий"
+    elif closes[-1] < ema7 < ema25:
+        return "медвежий"
+    else:
+        return "флэт"
 
 # ========= ANALYSIS =========
 async def analyze(pair):
     kl = await get_klines(pair, CURRENT_TF)
     if len(kl) < 30:
-        return None
+        return None, None
 
     closes, volumes, highs, lows = [], [], [], []
     for k in kl:
@@ -118,38 +96,33 @@ async def analyze(pair):
     ema7 = ema(closes, 7)
     ema25 = ema(closes, 25)
     vw = vwap(closes, volumes)
-    rsi_val = rsi(closes)
-    macd_line, macd_signal = macd(closes)
 
-    if not all([ema7, ema25, vw, rsi_val]):
-        return None
+    if not all([ema7, ema25, vw]):
+        return None, None
 
     vol_avg = sum(volumes[-20:]) / 20
     vol_now = volumes[-1]
 
     signal = None
+    strength = ""
+
     if price > ema7 > ema25 and price > vw:
         signal = "📈 ЛОНГ"
     elif price < ema7 < ema25 and price < vw:
         signal = "📉 ШОРТ"
 
-    spread = abs(ema7 - ema25) / price
-    strength = None
-    if vol_now > vol_avg * 1.8 and spread > 0.002:
-        strength = "🔥🔥"
-    elif vol_now > vol_avg * 1.3:
-        strength = "🔥"
+    if signal:
+        spread = abs(ema7 - ema25) / price
+        if vol_now > vol_avg * 1.8 and spread > 0.002:
+            strength = "🔥🔥"
+        elif vol_now > vol_avg * 1.3:
+            strength = "🔥"
 
-    # ===== FLAT FILTER (2 of 3) =====
-    flat_checks = 0
-    if spread < 0.002:
-        flat_checks += 1
-    if abs(price - vw) / price < 0.002:
-        flat_checks += 1
-    if vol_now < vol_avg:
-        flat_checks += 1
-
-    is_flat = flat_checks >= 2
+    breakout = None
+    if price > max(highs[-20:]) and vol_now > vol_avg * 1.5:
+        breakout = "🚀 ПРОБОЙ ВВЕРХ"
+    elif price < min(lows[-20:]) and vol_now > vol_avg * 1.5:
+        breakout = "💥 ПРОБОЙ ВНИЗ"
 
     return {
         "pair": pair,
@@ -158,15 +131,13 @@ async def analyze(pair):
         "ema25": ema25,
         "vwap": vw,
         "signal": signal,
-        "strength": strength,
-        "rsi": rsi_val,
-        "macd_ok": macd_line >= macd_signal,
-        "flat": is_flat
-    }
+        "strength": strength
+    }, breakout
 
 # ========= KEYBOARD =========
 def main_keyboard():
     rows = []
+
     for p, on in ENABLED_PAIRS.items():
         rows.append([
             InlineKeyboardButton(
@@ -174,10 +145,16 @@ def main_keyboard():
                 callback_data=f"pair:{p}"
             )
         ])
+
     rows.append([
         InlineKeyboardButton(text=f"⏱ {CURRENT_TF}", callback_data="tf"),
+        InlineKeyboardButton(
+            text=("🔴 Строгий" if STRICT_MODE else "🟢 Свободный"),
+            callback_data="strict"
+        ),
         InlineKeyboardButton(text="📊 Статус", callback_data="status")
     ])
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 # ========= HANDLERS =========
@@ -189,10 +166,9 @@ async def start(msg: types.Message):
 
 @dp.callback_query()
 async def callbacks(c: types.CallbackQuery):
-    global CURRENT_TF
+    global CURRENT_TF, STRICT_MODE
 
     if c.from_user.id != ADMIN_ID:
-        await c.answer()
         return
 
     if c.data.startswith("pair:"):
@@ -203,61 +179,61 @@ async def callbacks(c: types.CallbackQuery):
         i = TIMEFRAMES.index(CURRENT_TF)
         CURRENT_TF = TIMEFRAMES[(i + 1) % len(TIMEFRAMES)]
 
+    elif c.data == "strict":
+        STRICT_MODE = not STRICT_MODE
+
     elif c.data == "status":
         uptime = int((time.time() - START_TS) / 60)
         enabled = [p for p, v in ENABLED_PAIRS.items() if v]
         await c.message.answer(
-            "📊 Статус бота\n\n"
+            f"📊 Статус бота\n\n"
             f"🕒 Аптайм: {uptime} мин\n"
             f"⏱ Таймфрейм: {CURRENT_TF}\n"
+            f"🧠 Режим: {'СТРОГИЙ' if STRICT_MODE else 'СВОБОДНЫЙ'}\n"
             f"📈 Активные пары: {', '.join(enabled) if enabled else 'нет'}"
         )
 
-    await c.answer()
     await c.message.edit_reply_markup(reply_markup=main_keyboard())
+    await c.answer()
 
 # ========= SCANNER =========
 async def scanner():
     global LAST_SCAN_TS
+
     while True:
         LAST_SCAN_TS = time.time()
-        btc_ctx = await btc_trend()
+        btc_ctx = await btc_context()
 
         for p, on in ENABLED_PAIRS.items():
             if not on:
                 continue
 
-            result = await analyze(p)
+            result, breakout = await analyze(p)
             if not result or not result["signal"]:
                 continue
 
-            if result["flat"]:
+            # 🔒 строгий режим
+            if STRICT_MODE:
+                if result["signal"] == "📈 ЛОНГ" and btc_ctx != "бычий":
+                    continue
+                if result["signal"] == "📉 ШОРТ" and btc_ctx != "медвежий":
+                    continue
+
+            sig_key = f"{p}:{result['signal']}:{result['strength']}"
+            if LAST_SIGNAL.get(p) == sig_key:
                 continue
 
-            # BTC CONTEXT FILTER
-            if btc_ctx == "bull" and result["signal"] == "📉 ШОРТ":
-                continue
-            if btc_ctx == "bear" and result["signal"] == "📈 ЛОНГ":
-                continue
-
-            key = f"{p}:{result['signal']}:{result['strength']}"
-            if LAST_SIGNAL.get(p) == key:
-                continue
-            LAST_SIGNAL[p] = key
+            LAST_SIGNAL[p] = sig_key
 
             text = (
                 f"📊 {p} ({CURRENT_TF})\n"
-                f"{result['signal']} {result['strength'] or ''}\n\n"
+                f"{result['signal']} {result['strength']}\n\n"
                 f"📌 Контекст:\n"
-                f"• BTC: {'бичий' if btc_ctx=='bull' else 'медвежий' if btc_ctx=='bear' else 'нейтр.'}\n"
-                f"• RSI: {result['rsi']:.1f}\n"
-                f"• MACD: {'подтверждает' if result['macd_ok'] else 'не подтверждает'}\n"
-                f"• Флэт: нет\n\n"
+                f"• BTC: {btc_ctx}\n\n"
                 f"Цена: {result['price']:.4f}\n"
                 f"EMA7: {result['ema7']:.4f}\n"
                 f"EMA25: {result['ema25']:.4f}\n"
-                f"VWAP: {result['vwap']:.4f}\n\n"
-                f"https://www.binance.com/ru/futures/{p}"
+                f"VWAP: {result['vwap']:.4f}"
             )
 
             await bot.send_message(ADMIN_ID, text)
