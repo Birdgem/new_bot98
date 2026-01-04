@@ -24,86 +24,121 @@ TIMEFRAMES = ["1m", "5m", "15m"]
 CURRENT_TF = "5m"
 
 LAST_SIGNAL = {}
+LAST_BREAKOUT = {}
+LAST_SCAN_TS = 0
+START_TS = time.time()
 
-# ====== UTILS ======
+SCAN_INTERVAL = 60
+HEARTBEAT_INTERVAL = 3600
+
+# ========= UTILS =========
 def ema(data, period):
+    if len(data) < period:
+        return None
     k = 2 / (period + 1)
-    e = data[0]
-    for p in data[1:]:
+    e = sum(data[:period]) / period
+    for p in data[period:]:
         e = p * k + e * (1 - k)
     return e
 
 def vwap(closes, volumes):
-    return sum(c * v for c, v in zip(closes, volumes)) / sum(volumes)
+    total_vol = sum(volumes)
+    if total_vol == 0:
+        return None
+    return sum(c * v for c, v in zip(closes, volumes)) / total_vol
 
-# ====== BINANCE ======
-async def get_klines(symbol, interval, limit=100):
+# ========= BINANCE =========
+async def get_klines(symbol, interval, limit=120):
     async with aiohttp.ClientSession() as s:
-        async with s.get(BINANCE_URL, params={
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit
-        }) as r:
-            return await r.json()
+        async with s.get(
+            BINANCE_URL,
+            params={"symbol": symbol, "interval": interval, "limit": limit}
+        ) as r:
+            data = await r.json()
+            return data if isinstance(data, list) else []
 
-# ====== ANALYSIS ======
+# ========= ANALYSIS =========
 async def analyze(pair):
     kl = await get_klines(pair, CURRENT_TF)
-    closes = [float(k[4]) for k in kl]
-    volumes = [float(k[5]) for k in kl]
+    if len(kl) < 30:
+        return None, None
+
+    closes, volumes, highs, lows = [], [], [], []
+    for k in kl:
+        try:
+            closes.append(float(k[4]))
+            volumes.append(float(k[5]))
+            highs.append(float(k[2]))
+            lows.append(float(k[3]))
+        except Exception:
+            return None, None
 
     price = closes[-1]
-    ema7 = ema(closes[-7:], 7)
-    ema25 = ema(closes[-25:], 25)
+    ema7 = ema(closes, 7)
+    ema25 = ema(closes, 25)
     vw = vwap(closes, volumes)
-    vol_now = volumes[-1]
+
+    if not all([ema7, ema25, vw]):
+        return None, None
+
     vol_avg = sum(volumes[-20:]) / 20
+    vol_now = volumes[-1]
 
-    strength = ""
-    if vol_now > vol_avg * 1.8:
-        strength = "🔥🔥"
-    elif vol_now > vol_avg * 1.3:
-        strength = "🔥"
+    signal = None
+    strength = None
 
+    # ---- LONG / SHORT ----
     if price > ema7 > ema25 and price > vw:
-        direction = f"📈 ЛОНГ {strength}"
+        signal = "📈 ЛОНГ"
     elif price < ema7 < ema25 and price < vw:
-        direction = f"📉 ШОРТ {strength}"
-    else:
-        return None
+        signal = "📉 ШОРТ"
 
-    if LAST_SIGNAL.get(pair) == direction:
-        return None
+    # ---- 🔥🔥 ----
+    if signal:
+        spread = abs(ema7 - ema25) / price
+        if vol_now > vol_avg * 1.8 and spread > 0.002:
+            strength = "🔥🔥"
+        elif vol_now > vol_avg * 1.3:
+            strength = "🔥"
 
-    LAST_SIGNAL[pair] = direction
+    # ---- BREAKOUT ----
+    breakout = None
+    if price > max(highs[-20:]) and vol_now > vol_avg * 1.5:
+        breakout = "🚀 ПРОБОЙ ВВЕРХ"
+    elif price < min(lows[-20:]) and vol_now > vol_avg * 1.5:
+        breakout = "💥 ПРОБОЙ ВНИЗ"
 
     return (
-        f"📊 {pair} ({CURRENT_TF})\n"
-        f"💰 Цена: {price:.4f}\n"
-        f"EMA7: {ema7:.4f}\n"
-        f"EMA25: {ema25:.4f}\n"
-        f"VWAP: {vw:.4f}\n"
-        f"📦 Объём: {'высокий' if strength else 'обычный'}\n\n"
-        f"{direction}\n"
-        f"🔗 https://www.binance.com/ru/futures/{pair}"
+        {
+            "pair": pair,
+            "price": price,
+            "ema7": ema7,
+            "ema25": ema25,
+            "vwap": vw,
+            "signal": signal,
+            "strength": strength,
+        },
+        breakout
     )
 
-# ====== KEYBOARDS ======
+# ========= KEYBOARD =========
 def main_keyboard():
     rows = []
     for p, on in ENABLED_PAIRS.items():
         rows.append([
             InlineKeyboardButton(
-                text=("🟢 " if on else "🔴 ") + p.replace("USDT",""),
+                text=("🟢 " if on else "🔴 ") + p.replace("USDT", ""),
                 callback_data=f"pair:{p}"
             )
         ])
+
     rows.append([
-        InlineKeyboardButton(text=f"⏱ TF: {CURRENT_TF}", callback_data="tf")
+        InlineKeyboardButton(text=f"⏱ {CURRENT_TF}", callback_data="tf"),
+        InlineKeyboardButton(text="📊 Статус", callback_data="status")
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# ====== COMMANDS ======
+# ========= HANDLERS =========
 @dp.message(Command("start"))
 async def start(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
@@ -113,7 +148,6 @@ async def start(msg: types.Message):
 @dp.callback_query()
 async def callbacks(c: types.CallbackQuery):
     global CURRENT_TF
-
     if c.from_user.id != ADMIN_ID:
         return
 
@@ -125,30 +159,71 @@ async def callbacks(c: types.CallbackQuery):
         i = TIMEFRAMES.index(CURRENT_TF)
         CURRENT_TF = TIMEFRAMES[(i + 1) % len(TIMEFRAMES)]
 
+    elif c.data == "status":
+        uptime = int((time.time() - START_TS) / 60)
+        enabled = [p for p, v in ENABLED_PAIRS.items() if v]
+        await c.message.answer(
+            "📊 Статус бота\n\n"
+            f"🕒 Аптайм: {uptime} мин\n"
+            f"⏱ Таймфрейм: {CURRENT_TF}\n"
+            f"📈 Активные пары: {', '.join(enabled) if enabled else 'нет'}\n"
+            f"🔄 Последний скан: {int(time.time() - LAST_SCAN_TS)} сек назад"
+        )
+
     await c.message.edit_reply_markup(reply_markup=main_keyboard())
     await c.answer()
 
-# ====== SCANNER ======
+# ========= SCANNER =========
 async def scanner():
+    global LAST_SCAN_TS
     while True:
+        LAST_SCAN_TS = time.time()
         for p, on in ENABLED_PAIRS.items():
             if not on:
                 continue
+
             try:
-                res = await analyze(p)
-                if res:
-                    await bot.send_message(ADMIN_ID, res)
+                result, breakout = await analyze(p)
+                if not result:
+                    continue
+
+                sig_key = f"{p}:{result['signal']}:{result['strength']}"
+                if result["signal"] and LAST_SIGNAL.get(p) != sig_key:
+                    LAST_SIGNAL[p] = sig_key
+
+                    text = (
+                        f"📊 {p} ({CURRENT_TF})\n"
+                        f"{result['signal']}\n"
+                        f"{result['strength'] or ''}\n\n"
+                        f"Цена: {result['price']:.4f}\n"
+                        f"EMA7: {result['ema7']:.4f}\n"
+                        f"EMA25: {result['ema25']:.4f}\n"
+                        f"VWAP: {result['vwap']:.4f}\n\n"
+                        f"https://www.binance.com/ru/futures/{p}"
+                    )
+
+                    await bot.send_message(ADMIN_ID, text)
+
+                if breakout and LAST_BREAKOUT.get(p) != breakout:
+                    LAST_BREAKOUT[p] = breakout
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"📊 {p} ({CURRENT_TF})\n{breakout}\n\n"
+                        f"https://www.binance.com/ru/futures/{p}"
+                    )
+
             except Exception as e:
                 print(p, e)
-        await asyncio.sleep(60)
 
-# ====== HEARTBEAT ======
+        await asyncio.sleep(SCAN_INTERVAL)
+
+# ========= HEARTBEAT =========
 async def heartbeat():
     while True:
         await bot.send_message(ADMIN_ID, "✅ Бот жив и работает")
-        await asyncio.sleep(3600)
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
 
-# ====== MAIN ======
+# ========= MAIN =========
 async def main():
     asyncio.create_task(scanner())
     asyncio.create_task(heartbeat())
