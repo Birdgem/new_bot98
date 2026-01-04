@@ -23,6 +23,8 @@ ENABLED_PAIRS = {p: False for p in PAIRS}
 TIMEFRAMES = ["1m", "5m", "15m"]
 CURRENT_TF = "5m"
 
+STRICT_MODE = False  # <<< ВАЖНО
+
 LAST_SIGNAL = {}
 LAST_BREAKOUT = {}
 LAST_SCAN_TS = None
@@ -50,8 +52,7 @@ def vwap(closes, volumes):
 def rsi(closes, period=14):
     if len(closes) < period + 1:
         return None
-    gains = []
-    losses = []
+    gains, losses = [], []
     for i in range(-period, 0):
         diff = closes[i] - closes[i - 1]
         if diff >= 0:
@@ -71,7 +72,7 @@ def macd(closes):
     if not ema12 or not ema26:
         return None, None
     macd_line = ema12 - ema26
-    signal_line = macd_line  # упрощённо для realtime
+    signal_line = macd_line
     return macd_line, signal_line
 
 # ========= BINANCE =========
@@ -160,6 +161,12 @@ def main_keyboard():
             )
         ])
     rows.append([
+        InlineKeyboardButton(
+            text=f"🧠 Режим: {'СТРОГИЙ' if STRICT_MODE else 'ОБЫЧНЫЙ'}",
+            callback_data="mode"
+        )
+    ])
+    rows.append([
         InlineKeyboardButton(text=f"⏱ {CURRENT_TF}", callback_data="tf"),
         InlineKeyboardButton(text="📊 Статус", callback_data="status")
     ])
@@ -174,7 +181,7 @@ async def start(msg: types.Message):
 
 @dp.callback_query()
 async def callbacks(c: types.CallbackQuery):
-    global CURRENT_TF
+    global CURRENT_TF, STRICT_MODE
 
     if c.from_user.id != ADMIN_ID:
         await c.answer()
@@ -188,6 +195,9 @@ async def callbacks(c: types.CallbackQuery):
         i = TIMEFRAMES.index(CURRENT_TF)
         CURRENT_TF = TIMEFRAMES[(i + 1) % len(TIMEFRAMES)]
 
+    elif c.data == "mode":
+        STRICT_MODE = not STRICT_MODE
+
     elif c.data == "status":
         uptime = int((time.time() - START_TS) / 60)
         enabled = [p for p, v in ENABLED_PAIRS.items() if v]
@@ -199,6 +209,7 @@ async def callbacks(c: types.CallbackQuery):
         await c.message.answer(
             "📊 Статус бота\n\n"
             f"🕒 Аптайм: {uptime} мин\n"
+            f"🧠 Режим: {'СТРОГИЙ' if STRICT_MODE else 'ОБЫЧНЫЙ'}\n"
             f"⏱ Таймфрейм: {CURRENT_TF}\n"
             f"📈 Активные пары: {', '.join(enabled) if enabled else 'нет'}\n"
             f"🔄 Последний скан: {last_scan}"
@@ -221,6 +232,14 @@ async def scanner():
                 if not result:
                     continue
 
+                if STRICT_MODE:
+                    if (
+                        result["strength"] != "🔥🔥"
+                        or not (40 <= result["rsi"] <= 60)
+                        or not result["macd_ok"]
+                    ):
+                        continue
+
                 sig_key = f"{p}:{result['signal']}:{result['strength']}"
                 if result["signal"] and LAST_SIGNAL.get(p) != sig_key:
                     LAST_SIGNAL[p] = sig_key
@@ -232,8 +251,8 @@ async def scanner():
                         f"EMA7: {result['ema7']:.4f}\n"
                         f"EMA25: {result['ema25']:.4f}\n"
                         f"VWAP: {result['vwap']:.4f}\n\n"
-                        f"RSI(14): {result['rsi']:.1f} {'✅' if 40 <= result['rsi'] <= 60 else '⚠️'}\n"
-                        f"MACD: {'подтверждает ✅' if result['macd_ok'] else 'не подтверждает ❌'}\n\n"
+                        f"RSI(14): {result['rsi']:.1f}\n"
+                        f"MACD: {'подтверждает' if result['macd_ok'] else 'не подтверждает'}\n\n"
                         f"https://www.binance.com/ru/futures/{p}"
                     )
 
