@@ -1,48 +1,36 @@
 import asyncio
-import time
 import aiohttp
-from typing import Dict, List
+import time
 import os
+from typing import List, Dict
 
-
-
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message
 from aiogram.filters import Command
-from aiogram.enums import ParseMode
 
-# ===================== НАСТРОЙКИ =====================
+# ================== НАСТРОЙКИ ==================
 
-BOT_TOKENS = [
-    os.getenv("BOT_TOKEN_1"),
-    # os.getenv("BOT_TOKEN_2"),
-    # os.getenv("BOT_TOKEN_3"),
+BOT_TOKEN = os.getenv("BOT_TOKEN")        # токен бота
+ADMIN_ID = int(os.getenv("ADMIN_ID"))     # твой telegram user_id
+
+SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
 ]
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 TIMEFRAME = "5m"
+SCAN_INTERVAL = 300        # скан рынка (сек)
+ALIVE_INTERVAL = 3600      # бот жив (сек)
 
-COOLDOWN_SECONDS = 30  # откат между анализами
+BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 
-BINANCE_API = "https://api.binance.com/api/v3/klines"
+# защита от спама одинаковых сигналов
+last_signal: Dict[str, str] = {}
 
-last_run: Dict[int, float] = {}
+start_time = time.time()
 
-# ===================== КЛАВИАТУРЫ =====================
-
-def main_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Анализ", callback_data="analyze")],
-        [InlineKeyboardButton(text="📈 Статус бота", callback_data="status")]
-    ])
-
-def symbols_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=s, callback_data=f"symbol:{s}")]
-        for s in SYMBOLS
-    ])
-
-# ===================== УТИЛИТЫ =====================
+# ================== УТИЛИТЫ ==================
 
 async def fetch_klines(symbol: str, limit: int = 100):
     params = {
@@ -51,46 +39,48 @@ async def fetch_klines(symbol: str, limit: int = 100):
         "limit": limit
     }
     async with aiohttp.ClientSession() as session:
-        async with session.get(BINANCE_API, params=params) as resp:
-            return await resp.json()
+        async with session.get(BINANCE_KLINES, params=params) as r:
+            return await r.json()
+
 
 def ema(values: List[float], period: int):
     if len(values) < period:
         return None
     k = 2 / (period + 1)
-    ema_val = sum(values[:period]) / period
-    for price in values[period:]:
-        ema_val = price * k + ema_val * (1 - k)
-    return ema_val
+    e = sum(values[:period]) / period
+    for v in values[period:]:
+        e = v * k + e * (1 - k)
+    return e
 
-def vwap(closes: List[float], volumes: List[float]):
-    total_vol = sum(volumes)
-    if total_vol == 0:
+
+def vwap(prices: List[float], volumes: List[float]):
+    total = sum(volumes)
+    if total == 0:
         return None
-    return sum(c * v for c, v in zip(closes, volumes)) / total_vol
+    return sum(p * v for p, v in zip(prices, volumes)) / total
 
-# ===================== АНАЛИЗ =====================
 
-async def analyze_symbol(symbol: str):
+# ================== АНАЛИЗ ==================
+
+async def analyze(symbol: str):
     klines = await fetch_klines(symbol)
 
     if not isinstance(klines, list) or len(klines) < 30:
         return None
 
-    closes = []
-    volumes = []
+    closes, highs, lows, volumes = [], [], [], []
 
     for k in klines:
         try:
             closes.append(float(k[4]))
+            highs.append(float(k[2]))
+            lows.append(float(k[3]))
             volumes.append(float(k[5]))
-        except (IndexError, ValueError):
-            continue
-
-    if len(closes) < 30:
-        return None
+        except Exception:
+            return None
 
     price = closes[-1]
+
     ema7 = ema(closes, 7)
     ema25 = ema(closes, 25)
     vw = vwap(closes, volumes)
@@ -99,98 +89,106 @@ async def analyze_symbol(symbol: str):
         return None
 
     avg_volume = sum(volumes[-20:]) / 20
-    last_volume = volumes[-1]
-    volume_ok = last_volume > avg_volume
+    vol_ratio = volumes[-1] / avg_volume if avg_volume else 0
 
-    trend = "🟢 Бычий" if ema7 > ema25 else "🔴 Медвежий"
+    # тренд
+    bullish = ema7 > ema25
+    bearish = ema7 < ema25
 
-    if price > ema7 > ema25 and price > vw and volume_ok:
+    # сигналы
+    signal = None
+
+    if bullish and price > vw:
         signal = "📈 ЛОНГ"
-    elif price < ema7 < ema25 and price < vw and volume_ok:
+        if vol_ratio > 1.5:
+            signal = "🔥 ЛОНГ"
+
+    elif bearish and price < vw:
         signal = "📉 ШОРТ"
-    else:
-        signal = "⏸ ФЛЭТ"
+        if vol_ratio > 1.5:
+            signal = "🔥 ШОРТ"
 
-    link = f"https://www.binance.com/ru/futures/{symbol}"
+    # пробой
+    high_break = price > max(highs[-20:])
+    low_break = price < min(lows[-20:])
 
-    text = (
-        f"📊 <b>{symbol}</b>\n"
-        f"⏱ Таймфрейм: {TIMEFRAME}\n\n"
-        f"💰 Цена: {price:.4f}\n"
-        f"EMA 7: {ema7:.4f}\n"
-        f"EMA 25: {ema25:.4f}\n"
-        f"VWAP: {vw:.4f}\n\n"
-        f"📦 Объём: {'✔️' if volume_ok else '❌'}\n"
-        f"🐂 Тренд: {trend}\n\n"
-        f"🚦 Сигнал: <b>{signal}</b>\n\n"
-        f"🔗 <a href='{link}'>Открыть пару</a>"
-    )
+    if high_break and vol_ratio > 1.5:
+        signal = "🚀 ПРОБОЙ ВВЕРХ"
 
-    return text
+    if low_break and vol_ratio > 1.5:
+        signal = "💥 ПРОБОЙ ВНИЗ"
 
-# ===================== ХЕНДЛЕРЫ =====================
+    if not signal:
+        return None
 
+    return {
+        "symbol": symbol,
+        "signal": signal,
+        "price": price,
+        "ema7": ema7,
+        "ema25": ema25,
+        "vwap": vw,
+        "volume": vol_ratio,
+    }
+
+
+# ================== БОТ ==================
+
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
+
+
+@dp.message(Command("start"))
 async def start_cmd(message: Message):
-    await message.answer(
-        "👋 Привет!\n\n"
-        "Я сигнальный бот:\n"
-        "EMA 7 / EMA 25 / VWAP + объём\n\n"
-        "Выбери действие 👇",
-        reply_markup=main_keyboard()
-    )
-
-async def status_cb(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer(
-        "✅ Бот работает\n"
-        f"📊 Пар: {len(SYMBOLS)}\n"
-        f"⏱ Таймфрейм: {TIMEFRAME}\n"
-        f"⏳ Откат: {COOLDOWN_SECONDS} сек"
-    )
-
-async def analyze_cb(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer(
-        "Выбери торговую пару:",
-        reply_markup=symbols_keyboard()
-    )
-
-async def symbol_cb(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    now = time.time()
-
-    if user_id in last_run and now - last_run[user_id] < COOLDOWN_SECONDS:
-        await callback.answer("⏳ Подожди перед следующим запросом", show_alert=True)
+    if message.from_user.id != ADMIN_ID:
         return
+    await message.answer("🟢 Сигнальный бот запущен")
 
-    last_run[user_id] = now
 
-    symbol = callback.data.split(":")[1]
-    await callback.answer("⏳ Анализирую...")
+async def scanner():
+    while True:
+        for symbol in SYMBOLS:
+            result = await analyze(symbol)
+            if not result:
+                continue
 
-    result = await analyze_symbol(symbol)
+            key = f"{symbol}"
+            if last_signal.get(key) == result["signal"]:
+                continue
 
-    if not result:
-        await callback.message.answer("⚠️ Недостаточно данных для анализа")
-        return
+            last_signal[key] = result["signal"]
 
-    await callback.message.answer(result, parse_mode=ParseMode.HTML)
+            text = (
+                f"📊 {symbol}\n"
+                f"🚦 {result['signal']}\n\n"
+                f"Цена: {result['price']:.4f}\n"
+                f"EMA7: {result['ema7']:.4f}\n"
+                f"EMA25: {result['ema25']:.4f}\n"
+                f"VWAP: {result['vwap']:.4f}\n"
+                f"Объём x{result['volume']:.2f}\n\n"
+                f"https://www.binance.com/futures/{symbol}"
+            )
 
-# ===================== ЗАПУСК =====================
+            await bot.send_message(ADMIN_ID, text)
 
-async def run_bot(token: str):
-    bot = Bot(token=token)
-    dp = Dispatcher()
+        await asyncio.sleep(SCAN_INTERVAL)
 
-    dp.message.register(start_cmd, Command("start"))
-    dp.callback_query.register(analyze_cb, F.data == "analyze")
-    dp.callback_query.register(status_cb, F.data == "status")
-    dp.callback_query.register(symbol_cb, F.data.startswith("symbol:"))
 
-    await dp.start_polling(bot)
+async def alive_ping():
+    while True:
+        uptime = int((time.time() - start_time) / 60)
+        await bot.send_message(
+            ADMIN_ID,
+            f"🟢 Бот жив\n⏱ Аптайм: {uptime} мин"
+        )
+        await asyncio.sleep(ALIVE_INTERVAL)
+
 
 async def main():
-    await asyncio.gather(*(run_bot(t) for t in BOT_TOKENS))
+    asyncio.create_task(scanner())
+    asyncio.create_task(alive_ping())
+    await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
