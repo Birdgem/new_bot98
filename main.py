@@ -2,6 +2,8 @@ import asyncio
 import time
 import aiohttp
 from typing import Dict, List
+import os
+
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -10,10 +12,7 @@ from aiogram.enums import ParseMode
 
 # ===================== НАСТРОЙКИ =====================
 
-BOT_TOKENS = [
-    "TOKEN_1",
-    # "TOKEN_2",  # просто добавляешь сюда
-]
+TOKEN = os.getenv("BOT_TOKEN")
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 TIMEFRAME = "5m"
