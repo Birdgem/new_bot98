@@ -47,6 +47,33 @@ def vwap(closes, volumes):
         return None
     return sum(c * v for c, v in zip(closes, volumes)) / total_vol
 
+def rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return None
+    gains = []
+    losses = []
+    for i in range(-period, 0):
+        diff = closes[i] - closes[i - 1]
+        if diff >= 0:
+            gains.append(diff)
+        else:
+            losses.append(abs(diff))
+    avg_gain = sum(gains) / period if gains else 0
+    avg_loss = sum(losses) / period if losses else 0
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def macd(closes):
+    ema12 = ema(closes, 12)
+    ema26 = ema(closes, 26)
+    if not ema12 or not ema26:
+        return None, None
+    macd_line = ema12 - ema26
+    signal_line = macd_line  # упрощённо для realtime
+    return macd_line, signal_line
+
 # ========= BINANCE =========
 async def get_klines(symbol, interval, limit=120):
     async with aiohttp.ClientSession() as s:
@@ -77,8 +104,10 @@ async def analyze(pair):
     ema7 = ema(closes, 7)
     ema25 = ema(closes, 25)
     vw = vwap(closes, volumes)
+    rsi_val = rsi(closes)
+    macd_line, macd_signal = macd(closes)
 
-    if not all([ema7, ema25, vw]):
+    if not all([ema7, ema25, vw, rsi_val]):
         return None, None
 
     vol_avg = sum(volumes[-20:]) / 20
@@ -114,6 +143,8 @@ async def analyze(pair):
             "vwap": vw,
             "signal": signal,
             "strength": strength,
+            "rsi": rsi_val,
+            "macd_ok": macd_line >= macd_signal
         },
         breakout
     )
@@ -128,7 +159,6 @@ def main_keyboard():
                 callback_data=f"pair:{p}"
             )
         ])
-
     rows.append([
         InlineKeyboardButton(text=f"⏱ {CURRENT_TF}", callback_data="tf"),
         InlineKeyboardButton(text="📊 Статус", callback_data="status")
@@ -187,4 +217,52 @@ async def scanner():
                 continue
 
             try:
-                result, breakout = await analyze
+                result, breakout = await analyze(p)
+                if not result:
+                    continue
+
+                sig_key = f"{p}:{result['signal']}:{result['strength']}"
+                if result["signal"] and LAST_SIGNAL.get(p) != sig_key:
+                    LAST_SIGNAL[p] = sig_key
+
+                    text = (
+                        f"📊 {p} ({CURRENT_TF})\n"
+                        f"{result['signal']} {result['strength'] or ''}\n\n"
+                        f"Цена: {result['price']:.4f}\n"
+                        f"EMA7: {result['ema7']:.4f}\n"
+                        f"EMA25: {result['ema25']:.4f}\n"
+                        f"VWAP: {result['vwap']:.4f}\n\n"
+                        f"RSI(14): {result['rsi']:.1f} {'✅' if 40 <= result['rsi'] <= 60 else '⚠️'}\n"
+                        f"MACD: {'подтверждает ✅' if result['macd_ok'] else 'не подтверждает ❌'}\n\n"
+                        f"https://www.binance.com/ru/futures/{p}"
+                    )
+
+                    await bot.send_message(ADMIN_ID, text)
+
+                if breakout and LAST_BREAKOUT.get(p) != breakout:
+                    LAST_BREAKOUT[p] = breakout
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"📊 {p} ({CURRENT_TF})\n{breakout}\n\n"
+                        f"https://www.binance.com/ru/futures/{p}"
+                    )
+
+            except Exception as e:
+                print(p, e)
+
+        await asyncio.sleep(SCAN_INTERVAL)
+
+# ========= HEARTBEAT =========
+async def heartbeat():
+    while True:
+        await bot.send_message(ADMIN_ID, "✅ Бот жив и работает")
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+# ========= MAIN =========
+async def main():
+    asyncio.create_task(scanner())
+    asyncio.create_task(heartbeat())
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
