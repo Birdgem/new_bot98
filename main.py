@@ -25,7 +25,7 @@ CURRENT_TF = "5m"
 
 LAST_SIGNAL = {}
 LAST_BREAKOUT = {}
-LAST_SCAN_TS = 0
+LAST_SCAN_TS = None
 START_TS = time.time()
 
 SCAN_INTERVAL = 60
@@ -87,13 +87,11 @@ async def analyze(pair):
     signal = None
     strength = None
 
-    # ---- LONG / SHORT ----
     if price > ema7 > ema25 and price > vw:
         signal = "📈 ЛОНГ"
     elif price < ema7 < ema25 and price < vw:
         signal = "📉 ШОРТ"
 
-    # ---- 🔥🔥 ----
     if signal:
         spread = abs(ema7 - ema25) / price
         if vol_now > vol_avg * 1.8 and spread > 0.002:
@@ -101,7 +99,6 @@ async def analyze(pair):
         elif vol_now > vol_avg * 1.3:
             strength = "🔥"
 
-    # ---- BREAKOUT ----
     breakout = None
     if price > max(highs[-20:]) and vol_now > vol_avg * 1.5:
         breakout = "🚀 ПРОБОЙ ВВЕРХ"
@@ -148,7 +145,9 @@ async def start(msg: types.Message):
 @dp.callback_query()
 async def callbacks(c: types.CallbackQuery):
     global CURRENT_TF
+
     if c.from_user.id != ADMIN_ID:
+        await c.answer()
         return
 
     if c.data.startswith("pair:"):
@@ -162,16 +161,21 @@ async def callbacks(c: types.CallbackQuery):
     elif c.data == "status":
         uptime = int((time.time() - START_TS) / 60)
         enabled = [p for p, v in ENABLED_PAIRS.items() if v]
+        last_scan = (
+            f"{int(time.time() - LAST_SCAN_TS)} сек назад"
+            if LAST_SCAN_TS else "ещё не было"
+        )
+
         await c.message.answer(
             "📊 Статус бота\n\n"
             f"🕒 Аптайм: {uptime} мин\n"
             f"⏱ Таймфрейм: {CURRENT_TF}\n"
             f"📈 Активные пары: {', '.join(enabled) if enabled else 'нет'}\n"
-            f"🔄 Последний скан: {int(time.time() - LAST_SCAN_TS)} сек назад"
+            f"🔄 Последний скан: {last_scan}"
         )
 
-    await c.message.edit_reply_markup(reply_markup=main_keyboard())
     await c.answer()
+    await c.message.edit_reply_markup(reply_markup=main_keyboard())
 
 # ========= SCANNER =========
 async def scanner():
@@ -183,51 +187,4 @@ async def scanner():
                 continue
 
             try:
-                result, breakout = await analyze(p)
-                if not result:
-                    continue
-
-                sig_key = f"{p}:{result['signal']}:{result['strength']}"
-                if result["signal"] and LAST_SIGNAL.get(p) != sig_key:
-                    LAST_SIGNAL[p] = sig_key
-
-                    text = (
-                        f"📊 {p} ({CURRENT_TF})\n"
-                        f"{result['signal']}\n"
-                        f"{result['strength'] or ''}\n\n"
-                        f"Цена: {result['price']:.4f}\n"
-                        f"EMA7: {result['ema7']:.4f}\n"
-                        f"EMA25: {result['ema25']:.4f}\n"
-                        f"VWAP: {result['vwap']:.4f}\n\n"
-                        f"https://www.binance.com/ru/futures/{p}"
-                    )
-
-                    await bot.send_message(ADMIN_ID, text)
-
-                if breakout and LAST_BREAKOUT.get(p) != breakout:
-                    LAST_BREAKOUT[p] = breakout
-                    await bot.send_message(
-                        ADMIN_ID,
-                        f"📊 {p} ({CURRENT_TF})\n{breakout}\n\n"
-                        f"https://www.binance.com/ru/futures/{p}"
-                    )
-
-            except Exception as e:
-                print(p, e)
-
-        await asyncio.sleep(SCAN_INTERVAL)
-
-# ========= HEARTBEAT =========
-async def heartbeat():
-    while True:
-        await bot.send_message(ADMIN_ID, "✅ Бот жив и работает")
-        await asyncio.sleep(HEARTBEAT_INTERVAL)
-
-# ========= MAIN =========
-async def main():
-    asyncio.create_task(scanner())
-    asyncio.create_task(heartbeat())
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+                result, breakout = await analyze
