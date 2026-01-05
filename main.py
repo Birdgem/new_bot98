@@ -20,14 +20,19 @@ PAIRS = [
 ]
 
 ENABLED_PAIRS = {p: False for p in PAIRS}
+
+# ===== GRID UI STATE (ШАГ 1) =====
+GRID_ENABLED = {p: False for p in PAIRS}
+GRID_MODE = "FREE"  # FREE / STRICT
+
+# ===== GRID FUTURE PARAMS (НЕ ИСПОЛЬЗУЮТСЯ ПОКА) =====
+GRID_DRY_RUN_DEPOSIT = 100.0   # $
+GRID_DRY_RUN_LEVERAGE = 10     # x10
+
 TIMEFRAMES = ["1m", "5m", "15m"]
 CURRENT_TF = "15m"
 
-STRICT_MODE = False  # 🔥 СТРОГИЙ РЕЖИМ
-
 LAST_SIGNAL = {}
-LAST_BREAKOUT = {}
-LAST_SCAN_TS = 0
 START_TS = time.time()
 
 SCAN_INTERVAL = 60
@@ -59,85 +64,11 @@ async def get_klines(symbol, interval, limit=120):
             data = await r.json()
             return data if isinstance(data, list) else []
 
-# ========= BTC CONTEXT =========
-async def btc_context():
-    kl = await get_klines("BTCUSDT", CURRENT_TF)
-    if len(kl) < 30:
-        return "неопределён"
-
-    closes = [float(k[4]) for k in kl]
-    ema7 = ema(closes, 7)
-    ema25 = ema(closes, 25)
-
-    if not ema7 or not ema25:
-        return "неопределён"
-
-    if closes[-1] > ema7 > ema25:
-        return "бычий"
-    elif closes[-1] < ema7 < ema25:
-        return "медвежий"
-    else:
-        return "флэт"
-
-# ========= ANALYSIS =========
-async def analyze(pair):
-    kl = await get_klines(pair, CURRENT_TF)
-    if len(kl) < 30:
-        return None, None
-
-    closes, volumes, highs, lows = [], [], [], []
-    for k in kl:
-        closes.append(float(k[4]))
-        volumes.append(float(k[5]))
-        highs.append(float(k[2]))
-        lows.append(float(k[3]))
-
-    price = closes[-1]
-    ema7 = ema(closes, 7)
-    ema25 = ema(closes, 25)
-    vw = vwap(closes, volumes)
-
-    if not all([ema7, ema25, vw]):
-        return None, None
-
-    vol_avg = sum(volumes[-20:]) / 20
-    vol_now = volumes[-1]
-
-    signal = None
-    strength = ""
-
-    if price > ema7 > ema25 and price > vw:
-        signal = "📈 ЛОНГ"
-    elif price < ema7 < ema25 and price < vw:
-        signal = "📉 ШОРТ"
-
-    if signal:
-        spread = abs(ema7 - ema25) / price
-        if vol_now > vol_avg * 1.8 and spread > 0.002:
-            strength = "🔥🔥"
-        elif vol_now > vol_avg * 1.3:
-            strength = "🔥"
-
-    breakout = None
-    if price > max(highs[-20:]) and vol_now > vol_avg * 1.5:
-        breakout = "🚀 ПРОБОЙ ВВЕРХ"
-    elif price < min(lows[-20:]) and vol_now > vol_avg * 1.5:
-        breakout = "💥 ПРОБОЙ ВНИЗ"
-
-    return {
-        "pair": pair,
-        "price": price,
-        "ema7": ema7,
-        "ema25": ema25,
-        "vwap": vw,
-        "signal": signal,
-        "strength": strength
-    }, breakout
-
 # ========= KEYBOARD =========
 def main_keyboard():
     rows = []
 
+    # пары
     for p, on in ENABLED_PAIRS.items():
         rows.append([
             InlineKeyboardButton(
@@ -146,11 +77,21 @@ def main_keyboard():
             )
         ])
 
+    # сетка (только для включённых пар)
+    active_grid_pairs = [p for p in PAIRS if ENABLED_PAIRS[p]]
+    if active_grid_pairs:
+        rows.append([
+            InlineKeyboardButton(
+                text="🧱 Сетка: ON" if any(GRID_ENABLED[p] for p in active_grid_pairs) else "🧱 Сетка: OFF",
+                callback_data="grid_toggle"
+            )
+        ])
+
+    # режим + статус
     rows.append([
-        InlineKeyboardButton(text=f"⏱ {CURRENT_TF}", callback_data="tf"),
         InlineKeyboardButton(
-            text=("🔴 Строгий" if STRICT_MODE else "🟢 Свободный"),
-            callback_data="strict"
+            text=f"🧠 Режим: {'СТРОГИЙ' if GRID_MODE == 'STRICT' else 'СВОБОДНЫЙ'}",
+            callback_data="grid_mode"
         ),
         InlineKeyboardButton(text="📊 Статус", callback_data="status")
     ])
@@ -166,78 +107,46 @@ async def start(msg: types.Message):
 
 @dp.callback_query()
 async def callbacks(c: types.CallbackQuery):
-    global CURRENT_TF, STRICT_MODE
+    global GRID_MODE
 
     if c.from_user.id != ADMIN_ID:
+        await c.answer()
         return
 
     if c.data.startswith("pair:"):
         p = c.data.split(":")[1]
         ENABLED_PAIRS[p] = not ENABLED_PAIRS[p]
+        if not ENABLED_PAIRS[p]:
+            GRID_ENABLED[p] = False  # авто-выкл сетки
 
-    elif c.data == "tf":
-        i = TIMEFRAMES.index(CURRENT_TF)
-        CURRENT_TF = TIMEFRAMES[(i + 1) % len(TIMEFRAMES)]
+    elif c.data == "grid_toggle":
+        for p in PAIRS:
+            if ENABLED_PAIRS[p]:
+                GRID_ENABLED[p] = not GRID_ENABLED[p]
 
-    elif c.data == "strict":
-        STRICT_MODE = not STRICT_MODE
+    elif c.data == "grid_mode":
+        GRID_MODE = "STRICT" if GRID_MODE == "FREE" else "FREE"
 
     elif c.data == "status":
-        uptime = int((time.time() - START_TS) / 60)
-        enabled = [p for p, v in ENABLED_PAIRS.items() if v]
+        enabled_pairs = [p for p, v in ENABLED_PAIRS.items() if v]
+        grid_pairs = [p for p, v in GRID_ENABLED.items() if v]
+
         await c.message.answer(
-            f"📊 Статус бота\n\n"
-            f"🕒 Аптайм: {uptime} мин\n"
-            f"⏱ Таймфрейм: {CURRENT_TF}\n"
-            f"🧠 Режим: {'СТРОГИЙ' if STRICT_MODE else 'СВОБОДНЫЙ'}\n"
-            f"📈 Активные пары: {', '.join(enabled) if enabled else 'нет'}"
+            "📊 Статус бота\n\n"
+            f"🕒 Аптайм: {int((time.time() - START_TS)/60)} мин\n"
+            f"⏱ TF: {CURRENT_TF}\n"
+            f"🧠 Режим: {'СТРОГИЙ' if GRID_MODE=='STRICT' else 'СВОБОДНЫЙ'}\n"
+            f"📈 Активные пары: {', '.join(enabled_pairs) if enabled_pairs else 'нет'}\n"
+            f"🧱 Сетка: {', '.join(grid_pairs) if grid_pairs else 'выкл'}\n\n"
+            f"(DRY-RUN: депо {GRID_DRY_RUN_DEPOSIT}$, плечо x{GRID_DRY_RUN_LEVERAGE})"
         )
 
     await c.message.edit_reply_markup(reply_markup=main_keyboard())
     await c.answer()
 
-# ========= SCANNER =========
+# ========= SCANNER (ПОКА ПУСТОЙ ДЛЯ СЕТКИ) =========
 async def scanner():
-    global LAST_SCAN_TS
-
     while True:
-        LAST_SCAN_TS = time.time()
-        btc_ctx = await btc_context()
-
-        for p, on in ENABLED_PAIRS.items():
-            if not on:
-                continue
-
-            result, breakout = await analyze(p)
-            if not result or not result["signal"]:
-                continue
-
-            # 🔒 строгий режим
-            if STRICT_MODE:
-                if result["signal"] == "📈 ЛОНГ" and btc_ctx != "бычий":
-                    continue
-                if result["signal"] == "📉 ШОРТ" and btc_ctx != "медвежий":
-                    continue
-
-            sig_key = f"{p}:{result['signal']}:{result['strength']}"
-            if LAST_SIGNAL.get(p) == sig_key:
-                continue
-
-            LAST_SIGNAL[p] = sig_key
-
-            text = (
-                f"📊 {p} ({CURRENT_TF})\n"
-                f"{result['signal']} {result['strength']}\n\n"
-                f"📌 Контекст:\n"
-                f"• BTC: {btc_ctx}\n\n"
-                f"Цена: {result['price']:.4f}\n"
-                f"EMA7: {result['ema7']:.4f}\n"
-                f"EMA25: {result['ema25']:.4f}\n"
-                f"VWAP: {result['vwap']:.4f}"
-            )
-
-            await bot.send_message(ADMIN_ID, text)
-
         await asyncio.sleep(SCAN_INTERVAL)
 
 # ========= HEARTBEAT =========
