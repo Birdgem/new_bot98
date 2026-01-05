@@ -5,8 +5,6 @@ import time
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from signal_writer import push_signal
-from signal_writer import write_signal_loop
 
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
@@ -239,12 +237,7 @@ async def scanner():
             )
 
             await bot.send_message(ADMIN_ID, text)
- # запись сигнала для торгового бота
-if result["signal"] == "📈 ЛОНГ":
-    push_signal(p, "LONG", CURRENT_TF)
 
-elif result["signal"] == "📉 ШОРТ":
-    push_signal(p, "SHORT", CURRENT_TF)
         await asyncio.sleep(SCAN_INTERVAL)
 
 # ========= HEARTBEAT =========
@@ -257,7 +250,6 @@ async def heartbeat():
 async def main():
     asyncio.create_task(scanner())
     asyncio.create_task(heartbeat())
-    asyncio.create_task(write_signal_loop())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
