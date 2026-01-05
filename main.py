@@ -5,6 +5,7 @@ import time
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
@@ -12,25 +13,21 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-BINANCE_URL = "https://api.binance.com/api/v3/klines"
-
 PAIRS = [
     "HUSDT", "SOLUSDT", "ETHUSDT", "RIVERUSDT", "LIGHTUSDT",
     "BEATUSDT", "CYSUSDT", "ZPKUSDT", "RAVEUSDT", "DOGEUSDT"
 ]
 
 ENABLED_PAIRS = {p: False for p in PAIRS}
-
-# ===== GRID UI STATE =====
 GRID_ENABLED = {p: False for p in PAIRS}
-GRID_MODE = "FREE"  # FREE / STRICT
-
-# ===== GRID FUTURE PARAMS =====
-GRID_DRY_RUN_DEPOSIT = 100.0
-GRID_DRY_RUN_LEVERAGE = 10
 
 TIMEFRAMES = ["1m", "5m", "15m"]
 CURRENT_TF = "15m"
+
+GRID_MODE = "FREE"  # FREE / STRICT
+
+GRID_DRY_RUN_DEPOSIT = 100.0
+GRID_DRY_RUN_LEVERAGE = 10
 
 START_TS = time.time()
 
@@ -49,14 +46,12 @@ def main_keyboard():
             )
         ])
 
-    active_pairs = [p for p in PAIRS if ENABLED_PAIRS[p]]
-    if active_pairs:
-        rows.append([
-            InlineKeyboardButton(
-                text="🧱 Сетка: ON" if any(GRID_ENABLED[p] for p in active_pairs) else "🧱 Сетка: OFF",
-                callback_data="grid_toggle"
-            )
-        ])
+    rows.append([
+        InlineKeyboardButton(
+            text="🧱 Сетка: ON" if any(GRID_ENABLED[p] for p in PAIRS) else "🧱 Сетка: OFF",
+            callback_data="grid_toggle"
+        )
+    ])
 
     rows.append([
         InlineKeyboardButton(text=f"⏱ {CURRENT_TF}", callback_data="tf"),
@@ -78,12 +73,13 @@ async def start(msg: types.Message):
 
 @dp.callback_query()
 async def callbacks(c: types.CallbackQuery):
-    global GRID_MODE, CURRENT_TF
+    global CURRENT_TF, GRID_MODE
 
     if c.from_user.id != ADMIN_ID:
         await c.answer()
         return
 
+    # ---- STATE CHANGES ----
     if c.data.startswith("pair:"):
         p = c.data.split(":")[1]
         ENABLED_PAIRS[p] = not ENABLED_PAIRS[p]
@@ -116,7 +112,12 @@ async def callbacks(c: types.CallbackQuery):
             f"(DRY-RUN: депо {GRID_DRY_RUN_DEPOSIT}$, плечо x{GRID_DRY_RUN_LEVERAGE})"
         )
 
-    await c.message.edit_reply_markup(reply_markup=main_keyboard())
+    # ---- SAFE UI UPDATE ----
+    try:
+        await c.message.edit_reply_markup(reply_markup=main_keyboard())
+    except TelegramBadRequest:
+        pass  # сообщение нельзя обновить — игнорируем
+
     await c.answer()
 
 # ========= BACKGROUND =========
